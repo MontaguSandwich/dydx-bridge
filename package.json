@@ -1,0 +1,43 @@
+{
+  "name": "perp-bridge",
+  "version": "1.0.0",
+  "description": "Unified dYdX <-> Hyperliquid USDC Bridge",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "vite --port 3000",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@cosmjs/proto-signing": "^0.32.2",
+    "@cosmjs/stargate": "^0.32.2",
+    "@lifi/sdk": "^3.4.1",
+    "buffer": "^6.0.3",
+    "ethers": "^6.9.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "stream-browserify": "^3.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.7"
+  },
+  "overrides": {
+    "valibot": "1.2.0",
+    "esbuild": "0.25.0",
+    "bitcoinjs-lib": {
+      "valibot": "1.2.0"
+    },
+    "@lifi/sdk": {
+      "valibot": "1.2.0",
+      "@bigmi/core": {
+        "bitcoinjs-lib": {
+          "valibot": "1.2.0"
+        }
+      }
+    }
+  }
+}
