@@ -1,4 +1,11 @@
 import React, { useState, useEffect, useCallback, Component } from 'react';
+import { TransactionHistory } from './components/TransactionHistory.jsx';
+import {
+  addTransaction,
+  updateTransaction,
+  getPendingTransactions,
+  TxStatusEnum
+} from './services/history.js';
 
 // Error Boundary to prevent white screen crashes
 class ErrorBoundary extends Component {
@@ -386,6 +393,15 @@ function AppContent() {
   const [txHashes, setTxHashes] = useState({});
   const [arbUsdcBalance, setArbUsdcBalance] = useState(null);
   const [checkingBalance, setCheckingBalance] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [currentTxId, setCurrentTxId] = useState(null);
+
+  // Check for pending transactions on mount
+  useEffect(() => {
+    const pending = getPendingTransactions();
+    setPendingCount(pending.length);
+  }, []);
 
   // Check Arbitrum USDC balance
   const checkArbBalance = useCallback(async () => {
@@ -554,7 +570,16 @@ function AppContent() {
       console.log('TX confirmed');
       
       setStep(STEPS.COMPLETE);
-      
+
+      // Update transaction history with success
+      if (currentTxId) {
+        updateTransaction(currentTxId, {
+          status: TxStatusEnum.COMPLETE,
+          txHashes: { ...txHashes, lifiTx: tx.hash }
+        });
+        setPendingCount(prev => Math.max(0, prev - 1));
+      }
+
       // Refresh balance
       setTimeout(checkArbBalance, 2000);
       
@@ -700,6 +725,18 @@ function AppContent() {
     
     setStep(STEPS.AWAITING_APPROVAL);
     setError(null);
+
+    // Create transaction record in history
+    const historyTx = addTransaction({
+      amount: parseFloat(amount),
+      direction: direction,
+      status: TxStatusEnum.IN_PROGRESS,
+      sourceAddress: wallets.keplrAddress,
+      destAddress: wallets.evmAddress,
+      currentStep: 1
+    });
+    setCurrentTxId(historyTx.id);
+    setPendingCount(prev => prev + 1);
 
     let skipTxHash = null;
     
@@ -867,7 +904,15 @@ function AppContent() {
           
           skipTxHash = result.transactionHash;
           setTxHashes(prev => ({ ...prev, skipTx: skipTxHash }));
-          
+
+          // Update transaction history with tx hash
+          if (currentTxId) {
+            updateTransaction(currentTxId, {
+              txHashes: { skipTx: skipTxHash },
+              currentStep: 2
+            });
+          }
+
           // Only process the first cosmos tx (dYdX -> Noble/Arbitrum)
           break;
         }
@@ -888,6 +933,15 @@ function AppContent() {
         setError(`Step 1 failed: ${err.message || 'Unknown error'}`);
       }
       setStep(STEPS.ERROR);
+
+      // Update transaction history with failure
+      if (currentTxId) {
+        updateTransaction(currentTxId, {
+          status: TxStatusEnum.FAILED,
+          error: 'Step 1 failed'
+        });
+        setPendingCount(prev => Math.max(0, prev - 1));
+      }
       return; // Don't continue if step 1 fails
     }
 
@@ -940,6 +994,9 @@ function AppContent() {
           <span className="logo-text">PERP BRIDGE</span>
         </div>
         <div className="subtitle">dYdX ↔ Hyperliquid Unified Bridge</div>
+        <button className="history-btn" onClick={() => setHistoryOpen(true)}>
+          History {pendingCount > 0 && <span className="pending-badge">{pendingCount}</span>}
+        </button>
       </header>
 
       <main>
@@ -1241,6 +1298,12 @@ function AppContent() {
         <p className="disclaimer">This is experimental software. Bridge at your own risk.</p>
       </footer>
 
+      {/* Transaction History Modal */}
+      <TransactionHistory
+        isOpen={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+      />
+
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
 
@@ -1342,6 +1405,43 @@ function AppContent() {
         .subtitle {
           color: var(--text-secondary);
           font-size: 0.9rem;
+        }
+
+        .history-btn {
+          position: absolute;
+          top: 1rem;
+          right: 1.5rem;
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          padding: 0.5rem 1rem;
+          background: var(--bg-tertiary);
+          border: 1px solid var(--border);
+          border-radius: 8px;
+          color: var(--text-secondary);
+          font-family: inherit;
+          font-size: 0.85rem;
+          cursor: pointer;
+          transition: all 0.2s ease;
+        }
+
+        .history-btn:hover {
+          border-color: var(--accent-blue);
+          color: var(--text-primary);
+        }
+
+        .pending-badge {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-width: 18px;
+          height: 18px;
+          padding: 0 4px;
+          background: var(--accent-blue);
+          border-radius: 9px;
+          font-size: 0.7rem;
+          font-weight: 600;
+          color: white;
         }
 
         main {
