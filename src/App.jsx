@@ -420,6 +420,72 @@ function AppContent() {
     }
   }, [wallets.evmAddress, checkArbBalance]);
 
+  // Check dYdX USDC balance
+  const checkDydxBalance = useCallback(async () => {
+    if (!wallets.keplrAddress) return;
+
+    try {
+      // Use LCD API to get dYdX balance
+      const response = await fetch(`https://dydx-lcd.polkachu.com/cosmos/bank/v1beta1/balances/${wallets.keplrAddress}`);
+      if (response.ok) {
+        const data = await response.json();
+        const usdcBalance = data.balances?.find(
+          b => b.denom === CHAINS.dydx.usdcDenom
+        );
+        if (usdcBalance) {
+          const balanceNum = Number(usdcBalance.amount) / 1e6;
+          setDydxUsdcBalance(balanceNum);
+          return balanceNum;
+        }
+      }
+      setDydxUsdcBalance(0);
+      return 0;
+    } catch (err) {
+      console.error('Failed to check dYdX balance:', err);
+      setDydxUsdcBalance(null);
+      return null;
+    }
+  }, [wallets.keplrAddress]);
+
+  // Check dYdX balance when Keplr connects
+  useEffect(() => {
+    if (wallets.keplrAddress) {
+      checkDydxBalance();
+    }
+  }, [wallets.keplrAddress, checkDydxBalance]);
+
+  // Handle amount change with validation
+  const handleAmountChange = useCallback((e) => {
+    const value = e.target.value;
+    setAmount(value);
+    setAmountTouched(true);
+
+    // Get appropriate balance based on direction
+    const relevantBalance = direction === 'dydx-to-hl' ? dydxUsdcBalance : arbUsdcBalance;
+    const validation = validateAmount(value, relevantBalance);
+    setAmountErrors(validation.errors);
+  }, [direction, dydxUsdcBalance, arbUsdcBalance]);
+
+  // Handle amount blur (for showing errors after user leaves field)
+  const handleAmountBlur = useCallback(() => {
+    setAmountTouched(true);
+    const relevantBalance = direction === 'dydx-to-hl' ? dydxUsdcBalance : arbUsdcBalance;
+    const validation = validateAmount(amount, relevantBalance);
+    setAmountErrors(validation.errors);
+  }, [amount, direction, dydxUsdcBalance, arbUsdcBalance]);
+
+  // Re-validate when direction or balances change
+  useEffect(() => {
+    if (amountTouched && amount) {
+      const relevantBalance = direction === 'dydx-to-hl' ? dydxUsdcBalance : arbUsdcBalance;
+      const validation = validateAmount(amount, relevantBalance);
+      setAmountErrors(validation.errors);
+    }
+  }, [direction, dydxUsdcBalance, arbUsdcBalance, amount, amountTouched]);
+
+  // Computed validation state for button
+  const isAmountValid = amount && amountErrors.length === 0 && parseFloat(amount) >= VALIDATION.MIN_AMOUNT;
+
   // Send USDC from Arbitrum to Hyperliquid (Step 2 only)
   const sendToHyperliquid = async (amountToSend = null) => {
     setError(null);
@@ -516,7 +582,11 @@ function AppContent() {
   
   // Debounced quote fetching
   useEffect(() => {
-    if (!amount || parseFloat(amount) < 5 || !wallets.isConnected) {
+    // Only fetch quotes if amount is valid
+    const relevantBalance = direction === 'dydx-to-hl' ? dydxUsdcBalance : arbUsdcBalance;
+    const validation = validateAmount(amount, relevantBalance);
+
+    if (!validation.isValid || !wallets.isConnected) {
       setSkipRoute(null);
       setLifiRoute(null);
       return;
@@ -575,7 +645,7 @@ function AppContent() {
     }, 500);
 
     return () => clearTimeout(timer);
-  }, [amount, direction, wallets.isConnected, wallets.keplrAddress, wallets.evmAddress]);
+  }, [amount, direction, wallets.isConnected, wallets.keplrAddress, wallets.evmAddress, dydxUsdcBalance, arbUsdcBalance]);
 
   // Helper: Get USDC balance on Arbitrum
   const getArbitrumUsdcBalance = async (address) => {
@@ -939,25 +1009,48 @@ function AppContent() {
 
           {/* Amount Input */}
           <div className="amount-section">
-            <label>Amount (USDC)</label>
-            <div className="amount-input-wrapper">
+            <div className="amount-label-row">
+              <label>Amount (USDC)</label>
+              {direction === 'dydx-to-hl' && dydxUsdcBalance !== null && (
+                <span className="balance-hint">
+                  Balance: {dydxUsdcBalance.toFixed(2)} USDC
+                  <button
+                    type="button"
+                    className="max-btn"
+                    onClick={() => {
+                      setAmount(String(dydxUsdcBalance));
+                      setAmountTouched(true);
+                      setAmountErrors([]);
+                    }}
+                  >
+                    MAX
+                  </button>
+                </span>
+              )}
+            </div>
+            <div className={`amount-input-wrapper ${amountTouched && amountErrors.length > 0 ? 'has-error' : ''}`}>
               <input
-                type="number"
+                type="text"
+                inputMode="decimal"
                 value={amount}
-                onChange={(e) => setAmount(e.target.value)}
+                onChange={handleAmountChange}
+                onBlur={handleAmountBlur}
                 placeholder="0.00"
-                min="5"
-                step="0.01"
+                autoComplete="off"
               />
               <span className="currency">USDC</span>
             </div>
-            {amount && parseFloat(amount) < 5 && (
-              <span className="input-hint error">Minimum 5 USDC required</span>
+            {amountTouched && amountErrors.length > 0 && (
+              <div className="validation-errors">
+                {amountErrors.map((err, i) => (
+                  <span key={i} className="input-hint error">{err}</span>
+                ))}
+              </div>
             )}
           </div>
 
           {/* Route Flow Visualization */}
-          {wallets.isConnected && amount && parseFloat(amount) >= 5 && (
+          {wallets.isConnected && isAmountValid && (
             <div className="route-flow">
               <div className="route-step">
                 <div className="route-chain" style={{ borderColor: CHAINS.dydx.color }}>
@@ -998,7 +1091,7 @@ function AppContent() {
           )}
 
           {/* Quote Cards */}
-          {wallets.isConnected && amount && parseFloat(amount) >= 5 && (
+          {wallets.isConnected && isAmountValid && (
             <div className="quotes-grid">
               <QuoteCard 
                 title="Step 1: dYdX → Arbitrum"
@@ -1049,25 +1142,27 @@ function AppContent() {
             className="bridge-btn"
             onClick={executeBridge}
             disabled={
-              !wallets.isConnected || 
-              !amount || 
-              parseFloat(amount) < 5 || 
-              skipLoading || 
+              !wallets.isConnected ||
+              !isAmountValid ||
+              amountErrors.length > 0 ||
+              skipLoading ||
               lifiLoading ||
               skipRoute?.error ||
               lifiRoute?.error ||
               (step !== STEPS.IDLE && step !== STEPS.COMPLETE && step !== STEPS.ERROR)
             }
           >
-            {!wallets.isConnected 
+            {!wallets.isConnected
               ? 'Connect Wallets First'
-              : !amount || parseFloat(amount) < 5
-                ? 'Enter Amount (min 5 USDC)'
-                : skipLoading || lifiLoading
-                  ? 'Fetching Routes...'
-                  : step !== STEPS.IDLE && step !== STEPS.COMPLETE && step !== STEPS.ERROR
-                    ? STEP_LABELS[step]
-                    : `Bridge ${amount} USDC to Hyperliquid`
+              : !amount
+                ? 'Enter Amount'
+                : amountErrors.length > 0
+                  ? 'Fix Validation Errors'
+                  : skipLoading || lifiLoading
+                    ? 'Fetching Routes...'
+                    : step !== STEPS.IDLE && step !== STEPS.COMPLETE && step !== STEPS.ERROR
+                      ? STEP_LABELS[step]
+                      : `Bridge ${parseFloat(amount).toFixed(2)} USDC to Hyperliquid`
             }
           </button>
 
@@ -1436,6 +1531,55 @@ function AppContent() {
 
         .input-hint.error {
           color: var(--error);
+        }
+
+        .amount-label-row {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 0.5rem;
+        }
+
+        .balance-hint {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          font-size: 0.8rem;
+          color: var(--text-muted);
+        }
+
+        .max-btn {
+          padding: 0.2rem 0.5rem;
+          background: var(--bg-tertiary);
+          border: 1px solid var(--border);
+          border-radius: 4px;
+          color: var(--accent-blue);
+          font-size: 0.7rem;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.2s ease;
+        }
+
+        .max-btn:hover {
+          background: var(--accent-blue);
+          color: white;
+          border-color: var(--accent-blue);
+        }
+
+        .amount-input-wrapper.has-error input {
+          border-color: var(--error);
+        }
+
+        .amount-input-wrapper.has-error input:focus {
+          border-color: var(--error);
+          box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.2);
+        }
+
+        .validation-errors {
+          display: flex;
+          flex-direction: column;
+          gap: 0.25rem;
+          margin-top: 0.5rem;
         }
 
         .route-flow {
