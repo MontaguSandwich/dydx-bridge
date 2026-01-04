@@ -89,6 +89,10 @@ const STEPS = {
   BRIDGING_DYDX_ARB: 'bridging_dydx_arb',
   WAITING_ARB_FUNDS: 'waiting_arb_funds',
   BRIDGING_ARB_HL: 'bridging_arb_hl',
+  WITHDRAWING_HL: 'withdrawing_hl',
+  WAITING_HL_WITHDRAWAL: 'waiting_hl_withdrawal',
+  BRIDGING_ARB_DYDX: 'bridging_arb_dydx',
+  WAITING_DYDX_FUNDS: 'waiting_dydx_funds',
   COMPLETE: 'complete',
   ERROR: 'error'
 };
@@ -101,9 +105,68 @@ const STEP_LABELS = {
   [STEPS.BRIDGING_DYDX_ARB]: 'Bridging dYdX → Arbitrum...',
   [STEPS.WAITING_ARB_FUNDS]: 'Waiting for Arbitrum Funds...',
   [STEPS.BRIDGING_ARB_HL]: 'Bridging Arbitrum → Hyperliquid...',
+  [STEPS.WITHDRAWING_HL]: 'Withdrawing from Hyperliquid...',
+  [STEPS.WAITING_HL_WITHDRAWAL]: 'Waiting for Withdrawal...',
+  [STEPS.BRIDGING_ARB_DYDX]: 'Bridging Arbitrum → dYdX...',
+  [STEPS.WAITING_DYDX_FUNDS]: 'Waiting for dYdX Funds...',
   [STEPS.COMPLETE]: 'Bridge Complete!',
   [STEPS.ERROR]: 'Error'
 };
+
+// Validation constants
+const VALIDATION = {
+  MIN_AMOUNT: 1,       // Minimum 1 USDC
+  MAX_AMOUNT: 1000000, // Maximum 1M USDC
+  DECIMALS: 6          // USDC has 6 decimals
+};
+
+// Validate amount input
+function validateAmount(value, balance) {
+  const errors = [];
+
+  if (!value || value === '') {
+    return { isValid: false, errors: [] };
+  }
+
+  // Check for valid number format
+  const numValue = parseFloat(value);
+  if (isNaN(numValue)) {
+    errors.push('Please enter a valid number');
+    return { isValid: false, errors };
+  }
+
+  // Check for negative values
+  if (numValue < 0) {
+    errors.push('Amount cannot be negative');
+    return { isValid: false, errors };
+  }
+
+  // Check minimum amount
+  if (numValue < VALIDATION.MIN_AMOUNT) {
+    errors.push(`Minimum amount is ${VALIDATION.MIN_AMOUNT} USDC`);
+  }
+
+  // Check maximum amount
+  if (numValue > VALIDATION.MAX_AMOUNT) {
+    errors.push(`Maximum amount is ${VALIDATION.MAX_AMOUNT.toLocaleString()} USDC`);
+  }
+
+  // Check against available balance if provided
+  if (balance !== null && balance !== undefined && numValue > balance) {
+    errors.push(`Insufficient balance (${balance.toFixed(2)} USDC available)`);
+  }
+
+  // Check for too many decimal places
+  const decimalPart = value.split('.')[1];
+  if (decimalPart && decimalPart.length > VALIDATION.DECIMALS) {
+    errors.push(`Maximum ${VALIDATION.DECIMALS} decimal places allowed`);
+  }
+
+  return {
+    isValid: errors.length === 0,
+    errors
+  };
+}
 
 // Simulated API calls (replace with real implementations)
 const skipGoApi = {
@@ -165,6 +228,74 @@ const skipGoApi = {
       body: JSON.stringify(requestBody)
     });
     return response.json();
+  },
+
+  // Reverse route: Arbitrum -> dYdX
+  async getReverseRoute(amount, fromAddress, toAddress) {
+    const response = await fetch('https://api.skip.build/v2/fungible/route', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source_asset_denom: CHAINS.arbitrum.usdcAddress,
+        source_asset_chain_id: String(CHAINS.arbitrum.id),
+        dest_asset_denom: CHAINS.dydx.usdcDenom,
+        dest_asset_chain_id: CHAINS.dydx.id,
+        amount_in: String(Math.floor(amount * 1e6)),
+        cumulative_affiliate_fee_bps: '0',
+        allow_unsafe: true,
+        smart_relay: true,
+        bridges: ['CCTP', 'IBC', 'AXELAR']
+      })
+    });
+    return response.json();
+  },
+
+  // Get messages for reverse route (Arbitrum -> dYdX)
+  async getReverseMsgs(route, evmAddress, keplrAddress) {
+    let addressList;
+
+    if (route.required_chain_addresses) {
+      addressList = route.required_chain_addresses.map(chainId => {
+        if (chainId === '42161' || chainId === 42161) return evmAddress;
+        return keplrAddress;
+      });
+    } else {
+      addressList = [evmAddress, keplrAddress];
+    }
+
+    const requestBody = {
+      source_asset_denom: route.source_asset_denom,
+      source_asset_chain_id: route.source_asset_chain_id,
+      dest_asset_denom: route.dest_asset_denom,
+      dest_asset_chain_id: route.dest_asset_chain_id,
+      amount_in: route.amount_in,
+      amount_out: route.amount_out,
+      address_list: addressList,
+      operations: route.operations,
+      slippage_tolerance_percent: "1"
+    };
+
+    console.log('getReverseMsgs request:', JSON.stringify(requestBody, null, 2));
+
+    const response = await fetch('https://api.skip.build/v2/fungible/msgs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody)
+    });
+    return response.json();
+  }
+};
+
+// Hyperliquid withdrawal info for reverse direction
+const hyperliquidWithdraw = {
+  getQuote(amount) {
+    return {
+      tool: 'Hyperliquid Withdrawal',
+      estimatedTime: '~5-10 min',
+      fee: 1.00,
+      outputAmount: amount - 1.00,
+      note: 'Withdrawal to Arbitrum'
+    };
   }
 };
 
@@ -386,6 +517,9 @@ function AppContent() {
   const [txHashes, setTxHashes] = useState({});
   const [arbUsdcBalance, setArbUsdcBalance] = useState(null);
   const [checkingBalance, setCheckingBalance] = useState(false);
+  const [dydxUsdcBalance, setDydxUsdcBalance] = useState(null);
+  const [amountTouched, setAmountTouched] = useState(false);
+  const [amountErrors, setAmountErrors] = useState([]);
 
   // Check Arbitrum USDC balance
   const checkArbBalance = useCallback(async () => {
@@ -641,6 +775,52 @@ function AppContent() {
           setLifiRoute({ error: err.message || 'Failed to get bridge info' });
         }
         setLifiLoading(false);
+      } else if (direction === 'hl-to-dydx') {
+        // Reverse flow: Hyperliquid → dYdX
+
+        // Step 1: Hyperliquid withdrawal quote
+        setLifiLoading(true);
+        try {
+          const quote = hyperliquidWithdraw.getQuote(amountNum);
+          setLifiRoute({
+            tool: quote.tool,
+            estimatedTime: quote.estimatedTime,
+            fee: quote.fee,
+            outputAmount: quote.outputAmount,
+            note: quote.note
+          });
+        } catch (err) {
+          console.error('Hyperliquid withdrawal error:', err);
+          setLifiRoute({ error: err.message || 'Failed to get withdrawal info' });
+        }
+        setLifiLoading(false);
+
+        // Step 2: Skip route (Arbitrum → dYdX)
+        setSkipLoading(true);
+        try {
+          const hlWithdrawalOutput = amountNum - 1.00;
+          const route = await skipGoApi.getReverseRoute(hlWithdrawalOutput, wallets.evmAddress, wallets.keplrAddress);
+
+          console.log('Skip reverse route response:', JSON.stringify(route, null, 2));
+
+          if (route.error || route.message || !route.source_asset_chain_id) {
+            throw new Error(route.message || route.error || 'Invalid route response');
+          }
+
+          setSkipRoute({
+            raw: route,
+            tool: 'Skip Go (CCTP)',
+            estimatedTime: route.estimated_route_duration_seconds
+              ? `~${Math.ceil(route.estimated_route_duration_seconds / 60)} min`
+              : '~3-5 min',
+            fee: route.estimated_fees?.[0]?.usd_amount || 0.5,
+            outputAmount: hlWithdrawalOutput - (route.estimated_fees?.[0]?.usd_amount || 0.5)
+          });
+        } catch (err) {
+          console.error('Skip reverse route error:', err);
+          setSkipRoute({ error: err.message || 'Failed to fetch route' });
+        }
+        setSkipLoading(false);
       }
     }, 500);
 
