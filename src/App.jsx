@@ -105,6 +105,74 @@ const STEP_LABELS = {
   [STEPS.ERROR]: 'Error'
 };
 
+// Validation constants
+const VALIDATION = {
+  MIN_AMOUNT: 1, // Minimum 1 USDC
+  MAX_AMOUNT: 1000000, // Maximum 1M USDC
+  DECIMALS: 6
+};
+
+/**
+ * Validate bridge amount input
+ * @param {string} value - The input value
+ * @param {number|null} balance - Available balance
+ * @returns {{ isValid: boolean, errors: string[] }}
+ */
+function validateAmount(value, balance = null) {
+  const errors = [];
+
+  // Empty check
+  if (!value || value.trim() === '') {
+    return { isValid: false, errors: [] }; // No error message for empty (just invalid)
+  }
+
+  // Check for valid number format
+  const numValue = parseFloat(value);
+  if (isNaN(numValue)) {
+    errors.push('Please enter a valid number');
+    return { isValid: false, errors };
+  }
+
+  // Check for negative
+  if (numValue < 0) {
+    errors.push('Amount cannot be negative');
+    return { isValid: false, errors };
+  }
+
+  // Check for zero
+  if (numValue === 0) {
+    errors.push('Amount must be greater than 0');
+    return { isValid: false, errors };
+  }
+
+  // Check minimum
+  if (numValue < VALIDATION.MIN_AMOUNT) {
+    errors.push(`Minimum amount is ${VALIDATION.MIN_AMOUNT} USDC`);
+    return { isValid: false, errors };
+  }
+
+  // Check maximum
+  if (numValue > VALIDATION.MAX_AMOUNT) {
+    errors.push(`Maximum amount is ${VALIDATION.MAX_AMOUNT.toLocaleString()} USDC`);
+    return { isValid: false, errors };
+  }
+
+  // Check decimals (USDC has 6 decimals)
+  const decimalPart = value.split('.')[1];
+  if (decimalPart && decimalPart.length > VALIDATION.DECIMALS) {
+    errors.push(`Maximum ${VALIDATION.DECIMALS} decimal places allowed`);
+    return { isValid: false, errors };
+  }
+
+  // Check balance if available
+  if (balance !== null && numValue > balance) {
+    errors.push(`Insufficient balance. You have ${balance.toFixed(2)} USDC`);
+    return { isValid: false, errors };
+  }
+
+  return { isValid: true, errors: [] };
+}
+
 // Simulated API calls (replace with real implementations)
 const skipGoApi = {
   async getRoute(amount, fromAddress, toAddress) {
@@ -385,7 +453,10 @@ function AppContent() {
   const [error, setError] = useState(null);
   const [txHashes, setTxHashes] = useState({});
   const [arbUsdcBalance, setArbUsdcBalance] = useState(null);
+  const [dydxUsdcBalance, setDydxUsdcBalance] = useState(null);
   const [checkingBalance, setCheckingBalance] = useState(false);
+  const [amountTouched, setAmountTouched] = useState(false);
+  const [amountErrors, setAmountErrors] = useState([]);
 
   // Check Arbitrum USDC balance
   const checkArbBalance = useCallback(async () => {
