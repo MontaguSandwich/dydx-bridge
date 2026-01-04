@@ -107,7 +107,7 @@ const STEP_LABELS = {
 
 // Validation constants
 const VALIDATION = {
-  MIN_AMOUNT: 1, // Minimum 1 USDC
+  MIN_AMOUNT: 5, // Minimum 5 USDC (Hyperliquid bridge requirement - below this is lost!)
   MAX_AMOUNT: 1000000, // Maximum 1M USDC
   DECIMALS: 6
 };
