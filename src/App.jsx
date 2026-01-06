@@ -93,6 +93,42 @@ const STEPS = {
   ERROR: 'error'
 };
 
+// Validation constants
+const VALIDATION = {
+  MIN_AMOUNT: 1,      // Minimum 1 USDC
+  MAX_AMOUNT: 1000000 // Maximum 1M USDC
+};
+
+// Validate bridge amount
+function validateAmount(value, balance) {
+  const errors = [];
+
+  if (!value || value === '') {
+    return { errors: [], isValid: false };
+  }
+
+  const amount = parseFloat(value);
+
+  if (isNaN(amount)) {
+    errors.push('Please enter a valid number');
+    return { errors, isValid: false };
+  }
+
+  if (amount < VALIDATION.MIN_AMOUNT) {
+    errors.push(`Minimum amount is ${VALIDATION.MIN_AMOUNT} USDC`);
+  }
+
+  if (amount > VALIDATION.MAX_AMOUNT) {
+    errors.push(`Maximum amount is ${VALIDATION.MAX_AMOUNT} USDC`);
+  }
+
+  if (balance !== null && balance !== undefined && amount > balance) {
+    errors.push(`Insufficient balance (${balance.toFixed(2)} USDC available)`);
+  }
+
+  return { errors, isValid: errors.length === 0 };
+}
+
 const STEP_LABELS = {
   [STEPS.IDLE]: 'Ready',
   [STEPS.CONNECTING_WALLETS]: 'Connecting Wallets...',
@@ -386,6 +422,10 @@ function AppContent() {
   const [txHashes, setTxHashes] = useState({});
   const [arbUsdcBalance, setArbUsdcBalance] = useState(null);
   const [checkingBalance, setCheckingBalance] = useState(false);
+  const [dydxUsdcBalance, setDydxUsdcBalance] = useState(null);
+  const [amountTouched, setAmountTouched] = useState(false);
+  const [amountErrors, setAmountErrors] = useState([]);
+  const [bridgedAmount, setBridgedAmount] = useState(null); // Track the exact amount being bridged
 
   // Check Arbitrum USDC balance
   const checkArbBalance = useCallback(async () => {
@@ -490,7 +530,7 @@ function AppContent() {
   const sendToHyperliquid = async (amountToSend = null) => {
     setError(null);
     setStep(STEPS.BRIDGING_ARB_HL);
-    
+
     try {
       if (!window.ethereum) {
         throw new Error('MetaMask not found');
@@ -514,24 +554,46 @@ function AppContent() {
       const provider = new window.ethers.BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
 
-      // Get balance if no amount specified
+      // Get current balance to verify we have enough
+      const usdcContract = new window.ethers.Contract(
+        CHAINS.arbitrum.usdcAddress,
+        ['function balanceOf(address) view returns (uint256)'],
+        provider
+      );
+      const currentBalance = await usdcContract.balanceOf(wallets.evmAddress);
+      const currentBalanceUsdc = Number(currentBalance) / 1e6;
+
+      console.log('Current Arbitrum USDC balance:', currentBalanceUsdc);
+
+      // Determine amount to send with safety checks
       let sendAmount;
-      if (amountToSend) {
+      let sendAmountUsdc;
+
+      if (amountToSend && amountToSend > 0) {
+        // Use the specified amount (from the bridge flow)
+        sendAmountUsdc = amountToSend;
         sendAmount = BigInt(Math.floor(amountToSend * 1e6));
+      } else if (bridgedAmount && bridgedAmount > 0) {
+        // Fallback to stored bridged amount (for Resume button)
+        sendAmountUsdc = bridgedAmount;
+        sendAmount = BigInt(Math.floor(bridgedAmount * 1e6));
+        console.log('Using stored bridged amount:', sendAmountUsdc);
       } else {
-        const usdcContract = new window.ethers.Contract(
-          CHAINS.arbitrum.usdcAddress,
-          ['function balanceOf(address) view returns (uint256)'],
-          provider
+        // No amount specified - this is dangerous! Require explicit amount.
+        throw new Error('No amount specified. Please enter an amount or restart the bridge process.');
+      }
+
+      // CRITICAL: Verify we have sufficient balance
+      if (currentBalance < sendAmount) {
+        throw new Error(
+          `Insufficient balance on Arbitrum. ` +
+          `Have: ${currentBalanceUsdc.toFixed(2)} USDC, ` +
+          `Need: ${sendAmountUsdc.toFixed(2)} USDC. ` +
+          `CCTP bridge may still be in progress. Please wait and try again.`
         );
-        sendAmount = await usdcContract.balanceOf(wallets.evmAddress);
       }
 
-      if (sendAmount <= 0) {
-        throw new Error('No USDC balance on Arbitrum');
-      }
-
-      console.log('Sending to Hyperliquid:', Number(sendAmount) / 1e6, 'USDC');
+      console.log('Sending to Hyperliquid:', sendAmountUsdc, 'USDC');
 
       // Create USDC contract for transfer
       const usdcWithSigner = new window.ethers.Contract(
@@ -577,6 +639,7 @@ function AppContent() {
     setStep(STEPS.IDLE);
     setError(null);
     setTxHashes({});
+    setBridgedAmount(null); // Clear the stored bridged amount
     checkArbBalance();
   };
   
@@ -660,7 +723,8 @@ function AppContent() {
   };
 
   // Helper: Wait for USDC arrival on Arbitrum with polling
-  const waitForArbitrumFunds = async (address, initialBalance, timeout = 600000) => {
+  // CCTP bridge typically takes 5-15 minutes, so use 20 minute timeout
+  const waitForArbitrumFunds = async (address, initialBalance, timeout = 1200000) => {
     const startTime = Date.now();
     const checkInterval = 10000; // Check every 10 seconds
     
@@ -894,23 +958,31 @@ function AppContent() {
     // ============================================
     // STEP 2: Wait for funds on Arbitrum
     // ============================================
+    let receivedAmountUsdc = null;
     try {
       setStep(STEPS.WAITING_ARB_FUNDS);
-      
+
       // Get initial balance
       const initialBalance = await getArbitrumUsdcBalance(wallets.evmAddress);
       console.log('Initial Arbitrum balance:', Number(initialBalance) / 1e6);
-      
-      // Poll for balance increase (CCTP typically takes 3-10 minutes)
+
+      // Poll for balance increase (CCTP typically takes 5-15 minutes)
       const receivedAmount = await waitForArbitrumFunds(wallets.evmAddress, initialBalance);
-      console.log(`Received ${Number(receivedAmount) / 1e6} USDC on Arbitrum`);
-      
+      receivedAmountUsdc = Number(receivedAmount) / 1e6;
+      console.log(`Received ${receivedAmountUsdc} USDC on Arbitrum`);
+
+      // Store the bridged amount for recovery purposes
+      setBridgedAmount(receivedAmountUsdc);
+
       // Update displayed balance
       await checkArbBalance();
-      
+
     } catch (err) {
       console.error('Step 2 (waiting for Arbitrum funds) failed:', err);
-      setError(`Funds sent from dYdX! CCTP bridge in progress. Use "Send to Hyperliquid" button once funds arrive on Arbitrum (~5-10 min).`);
+      // Store the expected amount so user can recover with Resume button
+      const expectedAmount = parseFloat(amount);
+      setBridgedAmount(expectedAmount);
+      setError(`Funds sent from dYdX! CCTP bridge in progress. Use "Send to Hyperliquid" button once funds arrive on Arbitrum (~5-15 min). Expected: ${expectedAmount.toFixed(2)} USDC`);
       setStep(STEPS.ERROR);
       return; // User can use Resume button
     }
@@ -919,7 +991,8 @@ function AppContent() {
     // STEP 3: Transfer USDC to Hyperliquid Bridge
     // ============================================
     try {
-      await sendToHyperliquid();
+      // CRITICAL: Pass the exact received amount, NOT the entire balance
+      await sendToHyperliquid(receivedAmountUsdc);
     } catch (err) {
       // Error already handled in sendToHyperliquid
       console.error('Step 3 failed:', err);
@@ -1184,15 +1257,24 @@ function AppContent() {
               </div>
               
               {arbUsdcBalance > 0 && (
-                <button 
+                <button
                   className="resume-btn"
-                  onClick={() => sendToHyperliquid()}
+                  onClick={() => {
+                    // Use bridgedAmount if available, otherwise use current balance
+                    const amountToUse = bridgedAmount || arbUsdcBalance;
+                    sendToHyperliquid(amountToUse);
+                  }}
                   disabled={step === STEPS.BRIDGING_ARB_HL}
                 >
-                  {step === STEPS.BRIDGING_ARB_HL 
-                    ? 'Sending...' 
-                    : `Send ${arbUsdcBalance.toFixed(2)} USDC to Hyperliquid`}
+                  {step === STEPS.BRIDGING_ARB_HL
+                    ? 'Sending...'
+                    : `Send ${(bridgedAmount || arbUsdcBalance).toFixed(2)} USDC to Hyperliquid`}
                 </button>
+              )}
+              {bridgedAmount && bridgedAmount !== arbUsdcBalance && arbUsdcBalance > 0 && (
+                <div className="balance-warning">
+                  Note: Bridged amount ({bridgedAmount.toFixed(2)}) differs from balance ({arbUsdcBalance.toFixed(2)})
+                </div>
               )}
               
               {(step === STEPS.ERROR || step === STEPS.COMPLETE) && (
@@ -1957,6 +2039,16 @@ function AppContent() {
         .reset-btn:hover {
           border-color: var(--text-muted);
           color: var(--text-primary);
+        }
+
+        .balance-warning {
+          padding: 0.5rem;
+          background: rgba(250, 204, 21, 0.1);
+          border: 1px solid rgba(250, 204, 21, 0.3);
+          border-radius: 6px;
+          font-size: 0.75rem;
+          color: var(--accent-yellow);
+          text-align: center;
         }
 
         .info-panel {
