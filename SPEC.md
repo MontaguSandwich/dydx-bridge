@@ -29,8 +29,8 @@ A solver-based instant bridge system that enables sub-second USDC transfers betw
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
 │  │                      INTENT SUBMISSION LAYER                          │  │
 │  │                                                                       │  │
-│  │  User signs on dYdX, Skip API routes to Cosmos Hub FastTransfer:      │  │
-│  │  • Source: dYdX USDC (IBC'd to Cosmos Hub automatically)              │  │
+│  │  User signs on dYdX, Skip API routes to Osmosis FastTransfer:         │  │
+│  │  • Source: dYdX USDC (IBC'd to Osmosis automatically)                 │  │
 │  │  • Destination: Arbitrum domain + "HL:" prefix in data field          │  │
 │  │  • Amount: X USDC minus solver fee                                    │  │
 │  │  • ONE signature from user (Skip API handles multi-hop routing)       │  │
@@ -59,7 +59,7 @@ A solver-based instant bridge system that enables sub-second USDC transfers betw
 │  │                       EXTERNAL INTEGRATIONS                           │  │
 │  │                                                                       │  │
 │  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  │  │
-│  │  │ Cosmos Hub  │  │    dYdX     │  │ Hyperliquid │  │  Arbitrum   │  │  │
+│  │  │   Osmosis   │  │    dYdX     │  │ Hyperliquid │  │  Arbitrum   │  │  │
 │  │  │             │  │   Chain     │  │  L1 API     │  │  (Rebal)    │  │  │
 │  │  │             │  │             │  │             │  │             │  │  │
 │  │  │ FastTransfer│  │  IBC Source │  │  usdSend    │  │  USDC/HL    │  │  │
@@ -78,7 +78,27 @@ A solver-based instant bridge system that enables sub-second USDC transfers betw
 ### 2.1 dYdX → Hyperliquid (Primary Flow)
 
 **Key Design Decision**: Intent originates on dYdX. User signs ONE transaction via Skip API,
-which handles IBC routing to Cosmos Hub (FastTransfer contract) automatically.
+which handles IBC routing to Osmosis (FastTransfer contract) automatically.
+
+**Why Osmosis?** Cosmos Hub does NOT support CosmWasm (plans were scrapped). Osmosis is the
+confirmed host for Skip Go Fast contracts in the Cosmos ecosystem.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  CONFIRMED DEPLOYMENT                                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Osmosis FastTransfer Contract:                                             │
+│  osmo1vy34lpt5zlj797w7zqdta3qfq834kapx88qtgudy7jgljztj567s73ny82            │
+│                                                                             │
+│  Hyperlane Domain: 875                                                      │
+│  USDC Denom: ibc/498A0751C798A0D9A389AA3691123DADA57DAA4FE165D5C75894...    │
+│                                                                             │
+│  View on Celatone:                                                          │
+│  https://celatone.osmosis.zone/osmosis-1/contracts/osmo1vy34lpt...          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -92,8 +112,8 @@ which handles IBC routing to Cosmos Hub (FastTransfer contract) automatically.
 │  └── Fee displayed: ~0.1% (10 bps)                                          │
 │                                                                             │
 │  Frontend Actions:                                                          │
-│  1. Call Skip API with go_fast: true, destination = Cosmos Hub              │
-│  2. Skip API returns route: dYdX → IBC → Cosmos Hub (FastTransfer)          │
+│  1. Call Skip API with go_fast: true                                        │
+│  2. Skip API returns route: dYdX → IBC → Osmosis (FastTransfer)             │
 │  3. Include HL address in intent metadata (data field)                      │
 │  4. Display confirmation with fee breakdown                                 │
 │                                                                             │
@@ -106,7 +126,7 @@ which handles IBC routing to Cosmos Hub (FastTransfer contract) automatically.
 │                                                                             │
 │  Skip API constructs a multi-message transaction:                           │
 │                                                                             │
-│  Message 1: IBC MsgTransfer (dYdX → Cosmos Hub)                             │
+│  Message 1: IBC MsgTransfer (dYdX → Osmosis)                                │
 │  ├── From: dydx1abc... (user's dYdX address)                                │
 │  ├── Denom: ibc/8E27BA2D5493AF5636760E354E46004562C46AB7EC0CC4C1CA14...    │
 │  ├── Amount: 1000000000 (1000 USDC)                                         │
@@ -115,7 +135,7 @@ which handles IBC routing to Cosmos Hub (FastTransfer contract) automatically.
 │  The IBC memo encodes the FastTransfer submitOrder call:                    │
 │  {                                                                          │
 │    "wasm": {                                                                │
-│      "contract": "cosmos1<fast_transfer_gateway>",                          │
+│      "contract": "osmo1vy34lpt5zlj797w7zqdta3qfq834kapx88qtg...",           │
 │      "msg": {                                                               │
 │        "submit_order": {                                                    │
 │          "recipient": "0x123...",      // User's HL address                 │
@@ -140,8 +160,8 @@ which handles IBC routing to Cosmos Hub (FastTransfer contract) automatically.
 │                                                                             │
 │  Automatic execution via IBC relayers:                                      │
 │                                                                             │
-│  3a. IBC packet relayed from dYdX → Cosmos Hub                              │
-│      └── USDC arrives on Cosmos Hub (~6 seconds)                            │
+│  3a. IBC packet relayed from dYdX → Osmosis                                 │
+│      └── USDC arrives on Osmosis (~6 seconds)                               │
 │                                                                             │
 │  3b. IBC memo triggers CosmWasm execution                                   │
 │      ├── FastTransfer Gateway contract receives USDC                        │
@@ -1478,21 +1498,27 @@ type RateLimits struct {
 
 ### Remaining Questions
 
-1. **Cosmos Hub FastTransfer Deployment**: Verify Skip:Go Fast contracts are deployed on Cosmos Hub
-   with permissionless CosmWasm. If not deployed yet, check timeline with Skip team.
+1. **Osmosis FastTransfer Verification**: ✅ CONFIRMED - Contract deployed at:
+   `osmo1vy34lpt5zlj797w7zqdta3qfq834kapx88qtgudy7jgljztj567s73ny82`
+   Run `scripts/query-osmosis-contract.sh` to verify supported destination domains.
 
-2. **Skip API Go Fast + Cosmos Hub**: Confirm Skip API's `go_fast: true` routes through Cosmos Hub
-   FastTransfer contract. May need to test with actual API call.
+2. **Skip API Go Fast + Osmosis**: Test Skip API's `go_fast: true` to confirm routes through
+   Osmosis FastTransfer. Run `node scripts/test-skip-go-fast.js` to verify.
 
 3. **Sub-account Support**: Does Hyperliquid's usdSend support sending directly to sub-accounts,
    or only main accounts? (Lower priority - main account support is sufficient for MVP)
 
-4. **IBC Memo Format**: Verify exact format for IBC memo to trigger CosmWasm execution on Cosmos Hub.
-   May use Packet Forward Middleware (PFM) or native wasm memo format.
+4. **IBC Memo Format**: Verify exact format for IBC memo to trigger CosmWasm execution on Osmosis.
+   May use Packet Forward Middleware (PFM) or native ibc-hooks format.
 
 5. **Testnet Availability**: Identify testnets for end-to-end testing:
-   - Cosmos Hub testnet with FastTransfer?
+   - Osmosis testnet with FastTransfer?
    - Hyperliquid testnet for usdSend testing?
+
+### Key Finding: Cosmos Hub Does NOT Have CosmWasm
+
+Cosmos Hub scrapped plans for smart contract support. Osmosis is the confirmed CosmWasm host
+for Skip Go Fast in the Cosmos ecosystem. All architecture references updated accordingly.
 
 ---
 
