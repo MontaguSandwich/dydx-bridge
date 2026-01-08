@@ -29,10 +29,11 @@ A solver-based instant bridge system that enables sub-second USDC transfers betw
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
 │  │                      INTENT SUBMISSION LAYER                          │  │
 │  │                                                                       │  │
-│  │  User submits intent to Noble/Osmosis FastTransfer contract:          │  │
-│  │  • Source: Noble USDC (user IBCs from dYdX first)                     │  │
-│  │  • Destination: Hyperliquid address (in metadata)                     │  │
+│  │  User signs on dYdX, Skip API routes to Cosmos Hub FastTransfer:      │  │
+│  │  • Source: dYdX USDC (IBC'd to Cosmos Hub automatically)              │  │
+│  │  • Destination: Arbitrum domain + "HL:" prefix in data field          │  │
 │  │  • Amount: X USDC minus solver fee                                    │  │
+│  │  • ONE signature from user (Skip API handles multi-hop routing)       │  │
 │  │                                                                       │  │
 │  └──────────────────────────────────┬───────────────────────────────────┘  │
 │                                     │                                       │
@@ -58,11 +59,11 @@ A solver-based instant bridge system that enables sub-second USDC transfers betw
 │  │                       EXTERNAL INTEGRATIONS                           │  │
 │  │                                                                       │  │
 │  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  │  │
-│  │  │   Noble     │  │  Osmosis    │  │ Hyperliquid │  │  Arbitrum   │  │  │
-│  │  │   Chain     │  │  Chain      │  │  L1 API     │  │  (Rebal)    │  │  │
+│  │  │ Cosmos Hub  │  │    dYdX     │  │ Hyperliquid │  │  Arbitrum   │  │  │
+│  │  │             │  │   Chain     │  │  L1 API     │  │  (Rebal)    │  │  │
 │  │  │             │  │             │  │             │  │             │  │  │
-│  │  │ FastTransfer│  │ FastTransfer│  │  usdSend    │  │  USDC       │  │  │
-│  │  │  Contract   │  │  Contract   │  │  Endpoint   │  │  Bridge     │  │  │
+│  │  │ FastTransfer│  │  IBC Source │  │  usdSend    │  │  USDC/HL    │  │  │
+│  │  │  Contract   │  │  (via Skip) │  │  Endpoint   │  │  Bridge     │  │  │
 │  │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘  │  │
 │  │                                                                       │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
@@ -76,6 +77,9 @@ A solver-based instant bridge system that enables sub-second USDC transfers betw
 
 ### 2.1 dYdX → Hyperliquid (Primary Flow)
 
+**Key Design Decision**: Intent originates on dYdX. User signs ONE transaction via Skip API,
+which handles IBC routing to Cosmos Hub (FastTransfer contract) automatically.
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  STEP 1: User Initiates Transfer (Frontend)                                  │
@@ -88,49 +92,63 @@ A solver-based instant bridge system that enables sub-second USDC transfers betw
 │  └── Fee displayed: ~0.1% (10 bps)                                          │
 │                                                                             │
 │  Frontend Actions:                                                          │
-│  1. Fetch current solver fee from API                                       │
-│  2. Calculate: user receives = amount - fee                                 │
-│  3. Display confirmation with breakdown                                     │
+│  1. Call Skip API with go_fast: true, destination = Cosmos Hub              │
+│  2. Skip API returns route: dYdX → IBC → Cosmos Hub (FastTransfer)          │
+│  3. Include HL address in intent metadata (data field)                      │
+│  4. Display confirmation with fee breakdown                                 │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  STEP 2: IBC Transfer dYdX → Noble (~6 seconds)                             │
+│  STEP 2: User Signs Single Transaction on dYdX                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  Transaction: IBC MsgTransfer                                               │
+│  Skip API constructs a multi-message transaction:                           │
+│                                                                             │
+│  Message 1: IBC MsgTransfer (dYdX → Cosmos Hub)                             │
 │  ├── From: dydx1abc... (user's dYdX address)                                │
-│  ├── To: noble1xyz... (user's Noble address, derived from same key)        │
 │  ├── Denom: ibc/8E27BA2D5493AF5636760E354E46004562C46AB7EC0CC4C1CA14...    │
-│  ├── Amount: 1000000000 (1000 USDC, 6 decimals)                             │
-│  └── Channel: channel-0 (dYdX → Noble)                                      │
+│  ├── Amount: 1000000000 (1000 USDC)                                         │
+│  └── Memo: Contains FastTransfer intent parameters (via PFM or wasm memo)   │
 │                                                                             │
-│  Signed with: Keplr wallet                                                  │
-│  Time: ~6 seconds (1-2 blocks)                                              │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  STEP 3: Submit Intent to FastTransfer Contract (~instant)                  │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  Contract: FastTransfer Gateway on Noble                                    │
-│  Function: submitOrder                                                      │
-│                                                                             │
-│  Parameters:                                                                │
+│  The IBC memo encodes the FastTransfer submitOrder call:                    │
 │  {                                                                          │
-│    "sender": "noble1xyz...",                                                │
-│    "recipient": "0x123...",           // User's Hyperliquid address         │
-│    "amount_in": "1000000000",         // 1000 USDC                          │
-│    "amount_out": "999000000",         // 999 USDC (after 0.1% fee)          │
-│    "destination_domain": 99999,       // Custom domain ID for Hyperliquid   │
-│    "timeout_timestamp": 1704672000,   // Unix timestamp                     │
-│    "data": "<encoded_hl_metadata>"    // Optional: sub-account, etc.        │
+│    "wasm": {                                                                │
+│      "contract": "cosmos1<fast_transfer_gateway>",                          │
+│      "msg": {                                                               │
+│        "submit_order": {                                                    │
+│          "recipient": "0x123...",      // User's HL address                 │
+│          "amount_out": "999000000",    // After fee                         │
+│          "destination_domain": 42161,  // Arbitrum domain (see note below)  │
+│          "timeout": 1704672000,                                             │
+│          "data": "0x484C3A..."         // "HL:" prefix + metadata           │
+│        }                                                                    │
+│      }                                                                      │
+│    }                                                                        │
 │  }                                                                          │
 │                                                                             │
-│  Emits: OrderSubmitted event with unique order_id                           │
+│  Signed with: Keplr wallet (ONE signature)                                  │
+│  Time: Transaction broadcasts in ~2 seconds                                 │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  STEP 3: IBC Relay + FastTransfer Intent Submission (~6-10 seconds)         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Automatic execution via IBC relayers:                                      │
+│                                                                             │
+│  3a. IBC packet relayed from dYdX → Cosmos Hub                              │
+│      └── USDC arrives on Cosmos Hub (~6 seconds)                            │
+│                                                                             │
+│  3b. IBC memo triggers CosmWasm execution                                   │
+│      ├── FastTransfer Gateway contract receives USDC                        │
+│      ├── submitOrder executes with encoded parameters                       │
+│      └── OrderSubmitted event emitted with unique order_id                  │
+│                                                                             │
+│  Note: This is atomic - if FastTransfer fails, IBC transfer reverts         │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -669,55 +687,197 @@ monitoring:
 
 ---
 
-## 5. Custom Intent Schema for Hyperliquid
+## 5. Hyperliquid Destination Encoding (Optimal Solution)
 
-Since Hyperliquid is not a standard Skip:Go Fast destination, we need a custom domain and metadata encoding.
+Since Hyperliquid is not a standard Skip:Go Fast destination chain, we need a way to signal
+to our solver that an intent should be fulfilled on Hyperliquid via `usdSend` rather than
+a standard on-chain transfer.
 
-### 5.1 Domain Registration
+### 5.1 Solution: Use Arbitrum Domain + Data Field Magic Prefix
+
+**Why this approach?**
+- No custom domain registration required
+- Works with existing Skip:Go Fast infrastructure
+- Solver-side logic only - no contract modifications
+- Clean separation: standard solvers ignore, our solver recognizes
 
 ```
-Hyperliquid Custom Domain ID: 99999
-
-Rationale: Using a high, unlikely-to-conflict number.
-Standard Hyperlane domains are chain IDs (e.g., 42161 for Arbitrum).
-99999 signals "custom destination" to our solver.
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  DESTINATION ENCODING STRATEGY                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Intent Parameters:                                                         │
+│  ├── destination_domain: 42161 (Arbitrum - standard, already supported)    │
+│  ├── recipient: User's EVM address (0x123...)                               │
+│  └── data: "HL:" + encoded_metadata (magic prefix signals Hyperliquid)      │
+│                                                                             │
+│  Solver Detection Logic:                                                    │
+│  1. Monitor all intents with destination_domain == 42161                    │
+│  2. Check if data field starts with "HL:" (0x484C3A in hex)                 │
+│  3. If YES → Fulfill via Hyperliquid usdSend                                │
+│  4. If NO  → Standard Arbitrum fulfillment (or skip if not our intent)     │
+│                                                                             │
+│  Benefits:                                                                  │
+│  ✓ Other solvers see valid Arbitrum intent, may compete (good for users)   │
+│  ✓ If we're offline, user still gets funds on Arbitrum (fallback works)    │
+│  ✓ No governance/registration needed                                        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 5.2 Intent Metadata Encoding
+### 5.2 Data Field Encoding
 
 ```go
-// Metadata structure for Hyperliquid-bound intents
+// Magic prefix for Hyperliquid-bound intents
+const HLMagicPrefix = "HL:"  // 0x484C3A in hex
+
+// Metadata structure (encoded after the magic prefix)
 type HLIntentMetadata struct {
     Version         uint8           // Schema version (1)
-    DestType        uint8           // 1 = Hyperliquid main account
-    HLAddress       [20]byte        // User's Hyperliquid address
+    DestType        uint8           // 1 = main account, 2 = sub-account, 3 = vault
+    HLAddress       [20]byte        // User's Hyperliquid address (same as recipient usually)
     SubAccount      [20]byte        // Optional: sub-account address (zeros if main)
     Flags           uint8           // Bit flags for options
 }
 
 // Flags:
-// 0x01 = Transfer to sub-account
-// 0x02 = Transfer to perp margin (vs spot)
+// 0x01 = Transfer to sub-account (use SubAccount field)
+// 0x02 = Transfer to perp margin (vs spot balance)
+// 0x04 = Reserved for future use
+
+// Full data field format:
+// Bytes 0-2:   "HL:" magic prefix (0x484C3A)
+// Byte 3:     Version (0x01)
+// Byte 4:     DestType (0x01 for main account)
+// Bytes 5-24: HLAddress (20 bytes)
+// Bytes 25-44: SubAccount (20 bytes, zeros if not used)
+// Byte 45:    Flags
 
 // Encoding function
-func EncodeHLMetadata(hlAddress common.Address, subAccount *common.Address, toPerp bool) []byte {
-    meta := HLIntentMetadata{
-        Version:   1,
-        DestType:  1,
-        HLAddress: hlAddress,
+func EncodeHLIntentData(hlAddress common.Address, opts *HLOptions) []byte {
+    data := make([]byte, 0, 46)
+
+    // Magic prefix
+    data = append(data, []byte("HL:")...)
+
+    // Version
+    data = append(data, 0x01)
+
+    // DestType
+    destType := uint8(1) // main account
+    if opts != nil && opts.SubAccount != nil {
+        destType = 2
+    }
+    data = append(data, destType)
+
+    // HLAddress (20 bytes)
+    data = append(data, hlAddress.Bytes()...)
+
+    // SubAccount (20 bytes)
+    if opts != nil && opts.SubAccount != nil {
+        data = append(data, opts.SubAccount.Bytes()...)
+    } else {
+        data = append(data, make([]byte, 20)...)
     }
 
-    if subAccount != nil {
-        meta.SubAccount = *subAccount
-        meta.Flags |= 0x01
+    // Flags
+    flags := uint8(0)
+    if opts != nil {
+        if opts.SubAccount != nil {
+            flags |= 0x01
+        }
+        if opts.ToPerp {
+            flags |= 0x02
+        }
     }
+    data = append(data, flags)
 
-    if toPerp {
-        meta.Flags |= 0x02
-    }
-
-    return encodeABI(meta)
+    return data
 }
+
+// Decoding function (solver-side)
+func DecodeHLIntentData(data []byte) (*HLIntentMetadata, error) {
+    // Check magic prefix
+    if len(data) < 3 || string(data[:3]) != "HL:" {
+        return nil, ErrNotHLIntent
+    }
+
+    if len(data) < 46 {
+        return nil, ErrInvalidHLData
+    }
+
+    meta := &HLIntentMetadata{
+        Version:  data[3],
+        DestType: data[4],
+    }
+    copy(meta.HLAddress[:], data[5:25])
+    copy(meta.SubAccount[:], data[25:45])
+    meta.Flags = data[45]
+
+    return meta, nil
+}
+```
+
+### 5.3 Solver Detection Flow
+
+```go
+func (f *HLFulfiller) ShouldFulfill(order *OrderSubmittedEvent) bool {
+    // Only look at Arbitrum-domain intents
+    if order.DestinationDomain != 42161 {
+        return false
+    }
+
+    // Check for HL magic prefix
+    hlMeta, err := DecodeHLIntentData(order.Data)
+    if err != nil {
+        // Not an HL intent, skip (let other solvers handle it)
+        return false
+    }
+
+    // Validate HL metadata
+    if hlMeta.Version != 1 {
+        log.Warn("Unknown HL intent version", "version", hlMeta.Version)
+        return false
+    }
+
+    // Check inventory
+    if !f.inventoryMgr.HasSufficientBalance("hyperliquid", order.AmountOut) {
+        log.Warn("Insufficient HL inventory for fill")
+        return false
+    }
+
+    return true
+}
+```
+
+### 5.4 Fallback Behavior
+
+If our solver is offline or out of inventory, the intent still has a valid Arbitrum destination.
+Other Skip:Go Fast solvers can fulfill it to Arbitrum, and the user can manually deposit to
+Hyperliquid. This provides graceful degradation.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  FALLBACK SCENARIOS                                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Scenario 1: Our solver online, has inventory                               │
+│  → User receives USDC on Hyperliquid in ~10 seconds ✓                       │
+│                                                                             │
+│  Scenario 2: Our solver online, but low inventory                           │
+│  → We skip the order                                                        │
+│  → Other solver fills to Arbitrum                                           │
+│  → User receives USDC on Arbitrum, can deposit to HL manually               │
+│                                                                             │
+│  Scenario 3: Our solver offline                                             │
+│  → Other solver fills to Arbitrum (they ignore HL: prefix)                  │
+│  → User receives USDC on Arbitrum                                           │
+│  → Frontend can prompt: "Solver unavailable. Deposit to Hyperliquid?"       │
+│                                                                             │
+│  Scenario 4: No solvers available, intent times out                         │
+│  → User's funds returned to source via timeout mechanism                    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -1305,17 +1465,34 @@ type RateLimits struct {
 
 ## 11. Open Questions
 
-1. **Noble FastTransfer Contract**: Is Skip:Go Fast deployed on Noble? If not, what's the timeline?
-   - Fallback: Route through Osmosis (user IBCs dYdX → Noble → Osmosis)
+### Resolved
 
-2. **Hyperliquid Rate Limits**: What are the rate limits on usdSend? Need to confirm with HL team.
+1. ~~**Intent Origination**~~: ✅ Intents originate on dYdX. User signs ONE transaction via Skip API,
+   which handles IBC routing to Cosmos Hub (with FastTransfer contract) automatically.
 
-3. **Custom Domain Registration**: Does Skip:Go Fast support custom destination domains, or do we need to modify the contract?
-   - Alternative: Encode HL address in the `data` field with standard Arbitrum domain
+2. ~~**Custom Domain Registration**~~: ✅ Use existing Arbitrum domain (42161) + "HL:" magic prefix
+   in data field. Solver-side detection only. No contract modifications needed.
+   See Section 5 for full encoding spec.
 
-4. **Sub-account Support**: Does usdSend support sending directly to sub-accounts, or only main accounts?
+3. ~~**Hyperliquid Rate Limits**~~: ✅ Not a concern for initial testing (single user).
 
-5. **Testnet Availability**: Is there a Noble testnet with FastTransfer? Hyperliquid testnet availability?
+### Remaining Questions
+
+1. **Cosmos Hub FastTransfer Deployment**: Verify Skip:Go Fast contracts are deployed on Cosmos Hub
+   with permissionless CosmWasm. If not deployed yet, check timeline with Skip team.
+
+2. **Skip API Go Fast + Cosmos Hub**: Confirm Skip API's `go_fast: true` routes through Cosmos Hub
+   FastTransfer contract. May need to test with actual API call.
+
+3. **Sub-account Support**: Does Hyperliquid's usdSend support sending directly to sub-accounts,
+   or only main accounts? (Lower priority - main account support is sufficient for MVP)
+
+4. **IBC Memo Format**: Verify exact format for IBC memo to trigger CosmWasm execution on Cosmos Hub.
+   May use Packet Forward Middleware (PFM) or native wasm memo format.
+
+5. **Testnet Availability**: Identify testnets for end-to-end testing:
+   - Cosmos Hub testnet with FastTransfer?
+   - Hyperliquid testnet for usdSend testing?
 
 ---
 
